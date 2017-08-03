@@ -1,0 +1,460 @@
+<?php
+/**
+ * @file
+ * Allows participants of the private message see status of the message.
+ */
+ 
+/**
+ * Implements hook_permission().
+ */
+function privatemsg_status_permission() {
+  return array(
+    'administer privatemsg_status settings' => array(
+      'title' => t('Administer privatemsg status'),
+      'description' => t('Configuration of the privatemsg status module.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_privatemsg_message_status_changed().
+ */
+function privatemsg_status_privatemsg_message_status_changed($pmid, $status, $account) {
+  if ($status == PRIVATEMSG_READ) {
+    _todo_status_record($pmid, $account);
+  }
+}
+
+/**
+ * This function do record in database about when and by whom message was read.
+ *
+ * @param $pmid
+ *   Message id.
+ * @param $account
+ *   User object, defaults to the current user.
+ */
+function _todo_status_record($pmid, $account) {
+  $time = time();
+
+  // Define if the record of the timeread is allready exist in database.
+  $exist = (bool)db_select('pm_status', 'pms')
+    ->fields('pms', array('mid', 'recipient'))
+    ->condition('pms.mid', $pmid)
+    ->condition('pms.recipient', $account->uid)
+    ->range(0, 1)
+    ->execute()
+    ->fetchAll();
+
+  // Define if user is an author of this message.
+  $author = (bool)db_select('pm_message', 'pm')
+    ->fields('pm', array('mid', 'author'))
+    ->condition('pm.mid', $pmid)
+    ->condition('pm.author', $account->uid)
+    ->range(0, 1)
+    ->execute()
+    ->fetchAll();
+
+  // Author of the message can not read own message.
+  if (!$exist && !$author) {
+    db_insert('pm_status')
+      ->fields(array(
+        'mid' => $pmid,
+        'timeread' => $time,
+        'recipient' => $account->uid,
+      ))
+      ->execute();
+  }
+  elseif ($exist && !$author) {
+    db_update('pm_status')
+      ->fields(array('timeread' => $time))
+      ->condition('mid', $pmid)
+      ->condition('recipient', $account->uid)
+      ->execute();
+  }
+}
+
+/**
+ * Implements hook_privatemsg_message_flush().
+ */
+function privatemsg_status_privatemsg_message_flush($message) {
+  db_delete('pm_status')
+    ->condition('mid', $message->mid)
+    ->execute();
+}
+
+/**
+ * Implements hook_user_delete().
+ */
+function privatemsg_status_user_delete($account) {
+  db_delete('pm_status')
+    ->condition('recipient', $account->uid)
+    ->execute();
+}
+
+/**
+ * Implements hook_privatemsg_message_view_alter().
+ */
+function privatemsg_status_privatemsg_message_view_alter(&$vars) {
+  if (variable_get('privatemsg_status_message_status', TRUE)) {
+    global $user;
+    $message = $vars['message'];
+    $vars['msg_status'] = _load_message_status($message, $user);
+  }
+}
+
+/**
+ * Define if message was read or not and build sentence about it.
+ *
+ * @param $message
+ *   Message object.
+ * @param $user
+ *   Current authorized user.
+ */
+function _load_message_status($message, $user) {
+  $author = $message->author;
+  $mid = $message->mid;
+
+  // Load all recipients of the message that have read the message.
+  $recipients = _load_message_recipients($mid, $author);
+
+  // If current user is an author of the message.
+  if ($user->uid == $author->uid) {
+    // If there are recipients who read the message.
+    if ($recipients) {
+      $one_recipient = FALSE;
+      foreach ($recipients as $recipient) {
+        if ($recipient->recipients_amount == 1) {
+          $one_recipient = TRUE;
+          break;
+        }
+        else {
+          $read_by[] = $recipient->name;
+        }
+      }
+      // If there are only one recipient,
+      // sentence will bee in this format.
+      if ($one_recipient) {
+        $msg_status = t('Your message was read:');
+      }
+      else {
+        $count = count($read_by);
+        $msg_status = format_plural($count, 'Your message was read by user', 'Your message was read by users') . ' ';
+        $last_one = array_pop($read_by);
+        if (count($read_by) == 0) {
+          $msg_status .= t('!recipient:', array('!recipient' => $last_one));
+        }
+        else {
+          $recipients = implode(', ', $read_by);
+          $msg_status .= t('!recipients and !last_one:', array('!recipients' => $recipients, '!last_one' => $last_one));
+        }
+      }
+      $msg_status .= ' ' . privatemsg_format_date($recipient->timeread);
+    }
+    else {
+      $query = db_select('pm_index', 'pmi')
+        ->fields('pmi', array('is_new'))
+        ->condition('pmi.mid', $mid)
+        ->condition('pmi.recipient', $author->uid, '<>')
+        ->condition('pmi.is_new', PRIVATEMSG_UNREAD)
+        ->range(0, 1);
+
+      $msg_is_unread = $query->execute()
+        ->fetchField();
+
+      if ($msg_is_unread) {
+        $msg_status = t('Your message is unread.');
+      }
+      // If status of the message in table pm_index is "read",
+      // but in table pm_status no record about when message was read 
+      // then module privatemsg_status was installed after message was read.
+      // This mean that time when message was read is lost, so return nothing.
+      else {
+        return;
+      }
+    }
+  }
+
+  // If current user is a potential recipient of the message.
+  else {
+    if ($recipients) {
+      // If current user is a recipient of the message.
+      if ($recipient = array_filter(array_keys($recipients), 'recipient_filter')) {
+        $recipient = array_pop($recipient);
+        $timeread = $recipients[$recipient]->timeread;
+        $msg_status = t('Message was read:') . ' ' . privatemsg_format_date($timeread);
+      }
+    }
+    else {
+      return;
+    }
+  }
+
+  if (!empty($msg_status)) {
+    return $msg_status;
+  }
+}
+
+/**
+ * Callback function for array_filter.
+ */
+function recipient_filter($var) {
+  global $user;
+  return ($var == $user->name);
+}
+
+/**
+ * Load all recipients of the message that have read the message.
+ *
+ * @param $mid
+ *   Message id.
+ * @param $author
+ *   Author of the message to exclude.
+ */
+function _load_message_recipients($mid, $author) {
+  $query = db_select('pm_status', 'pms');
+  $query->join('pm_index', 'pmi', 'pmi.mid = pms.mid');
+  $query->join('users', 'u', 'u.uid = pms.recipient');
+  $query->fields('pms', array('mid', 'timeread', 'recipient'))
+    ->fields('pmi', array('is_new'))
+    ->fields('u', array('name'))
+    ->condition('pms.mid', $mid)
+    ->condition('pmi.deleted', 0)
+    ->condition('pmi.recipient', $author->uid, '<>');
+
+  // Amount recipients of the current message.
+  $query->addExpression('COUNT(pmi.recipient)', 'recipients_amount');
+
+  $query->groupBy('pms.recipient');
+  $query->orderBy('pms.timeread');
+
+  return $query
+    ->execute()
+    ->fetchAllAssoc('name');
+}
+
+/**
+ * Implements hook_theme().
+ */
+function privatemsg_status_theme() {
+  $templates = array(
+    'privatemsg_view' => array(
+      'variables' => array('message' => NULL),
+      'template' => 'privatemsg-status-view',
+    ),
+    'privatemsg_recipients' => array(
+      'variables' => array('message' => NULL),
+      'template' => 'privatemsg-status-recipients',
+    ),
+  );
+  return $templates;
+}
+
+/**
+ * This function split html string of the participants to a parts
+ * then it changes status about of the participant and create a new string based on it.
+ *
+ * @param $html_string
+ *   Html string of the participants.
+ */
+function _rebuild_html_participants($html_string) {
+  // Find and remember matches - text, tag name, parameters of the tag and tag's value.
+  if (preg_match_all('/(.*?)<([a-z]+)\s+([a-z]+=[\"]*[^\"]*[^>]*)>(.*?)<\/[a-z]+>/i', $html_string, $matches, PREG_SET_ORDER)) {
+    $data_array = array();
+    foreach ($matches as $match) {
+      $data_array['data_for_' . $match[4]] = array(
+        'part_of_sentence' => $match[1],
+        'tag' => $match[2],
+        'parameters' => array(),
+        'value' => $match[4],
+      );
+      // Split all parameters to particular parameter.
+      $parameters = preg_split('/(?<=\")\s+(?=[a-z])/', $match[3]);
+      foreach ($parameters as $parameter) {
+        // Now we split parameter at key and value.
+        if (preg_match_all('/([^\s]+)(?=\=)=\"(.*?)\"/', $parameter, $lines, PREG_SET_ORDER)) {
+          foreach ($lines as $data) {
+            if (in_array('class', $data)) {
+              // If load_user_status() return FALSE then class will be "offline".
+              $class = load_user_status($match[4]) ? $data[2] : $data[2] . ' offline';
+              $data_array['data_for_' . $match[4]]['parameters'][$data[1]] = $class;
+            }
+            else {
+              $data_array['data_for_' . $match[4]]['parameters'][$data[1]] = $data[2];
+            }
+          }
+        }
+      }
+    }
+    // Build new string.
+    $new_string = '';
+    foreach ($data_array as $data) {
+      $new_string .= $data['part_of_sentence'];
+      $new_string .= '<' . $data['tag'];
+      foreach ($data['parameters'] as $key => $value) {
+        $new_string .= ' ' . $key . '="' . $value . '"';
+      }
+      $new_string .= '>';
+      $new_string .= $data['value'] . '</' . $data['tag'] . '>';
+    }
+
+    return $new_string;
+  }
+
+  // In case if participant wrote message only to himself.
+  else {
+    return $html_string;
+  }
+}
+
+/**
+ * Load status of the user (online or offline).
+ *
+ * @param $user
+ *   User name or user id.
+ */
+function load_user_status($user) {
+  $query = db_select('sessions', 's');
+  $query->fields('s', array('timestamp'));
+  if (is_numeric($user)) {
+    $query->condition('s.uid', $user);
+  }
+  elseif (is_string($user)) {
+    $query->join('users', 'u', 's.uid = u.uid');
+    $query->condition('u.name', $user);
+  }
+
+  $last_access = $query
+    ->range(0, 1)
+    ->execute()
+    ->fetchField();
+
+  $status = ((REQUEST_TIME - $last_access) < variable_get('privatemsg_status_user_in_seconds', 300)) ? TRUE : FALSE;
+
+  return $status;
+}
+
+/**
+ * Implements hook_menu().
+ */
+function privatemsg_status_menu() {
+
+  $items = array();
+
+  $items['admin/config/messaging/privatemsg/status'] = array(
+    'title' => 'Status',
+    'description' => 'Configure viewing of the private message status module',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('privatemsg_status_admin'),
+    'access arguments' => array('administer privatemsg_status settings'),
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  return $items;
+
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function privatemsg_status_form_privatemsg_admin_settings_alter(&$form, $form_state) {
+  // Add author to the list of possible columns.
+  $form['privatemsg_listing']['privatemsg_display_fields']['#options']['author'] = t('Author');
+}
+
+/**
+ * Callback for the admin configuration.
+ */
+function privatemsg_status_admin($form, &$form_state) {
+
+  $form['privatemsg_status'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Message status settings'),
+    '#collapsible' => TRUE,
+    '#collapsed' => FALSE,
+  );
+
+  $form['privatemsg_status']['privatemsg_status_message_status'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Private message status'),
+    '#default_value' => variable_get('privatemsg_status_message_status', TRUE),
+    '#description' => t('Configure if status of the message will be displayed on the thread page.'),
+    '#weight' => 10,
+  );
+
+  $form['user_status'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Participants status settings'),
+    '#collapsible' => TRUE,
+    '#collapsed' => FALSE,
+  );
+
+  $form['user_status']['privatemsg_status_user_status'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Participants status'),
+    '#default_value' => variable_get('privatemsg_status_user_status', TRUE),
+    '#description' => t("Configure if status of the participants will be displayed on the thread page. If so then participant's name of the 'offline' will be displayed in silver color, 'online' in standard color."),
+    '#weight' => 8,
+  );
+
+  $form['user_status']['privatemsg_status_user_in_seconds'] = array(
+    '#prefix' => '<div id="privatemsg-status-default-button">',
+    '#suffix' => '</div>',
+    '#type' => 'select',
+    '#title' => t('Time when participants status considered as online'),
+    '#default_value' => variable_get('privatemsg_status_user_in_seconds', 300),
+    '#description' => t('Time when participants are considered "online" after they do last access to the site.'),
+    '#options' => drupal_map_assoc(array(60, 120, 180, 240, 300, 420, 600, 720, 900), 'format_interval'),
+    '#weight' => 9,
+    '#states' => array(
+      'visible' => array(
+        "input[name='privatemsg_status_user_status']" => array('checked' => TRUE),
+      )
+    )
+  );
+
+  return system_settings_form($form);
+}
+
+/**
+ * Implements hook_query_privatemsg_list_alter().
+ */
+function privatemsg_status_query_privatemsg_list_alter(QueryAlterableInterface $query) {
+  $fields = array_filter(variable_get('privatemsg_display_fields', array('participants')));
+  if (in_array('author', $fields)) {
+    $query->addExpression("(SELECT u.name
+                            FROM {users} u
+                            JOIN pm_message pm ON u.uid = pm.author
+                            WHERE pm.mid = pmi.thread_id
+                            LIMIT 0, 1)", 'author');
+    $query->orderByHeader(_privatemsg_list_headers(array_merge(array('subject', 'author', 'last_updated'), $fields)));
+  }
+}
+
+/**
+ * Theme the author field.
+ *
+ * @see theme_privatemsg_list_field()
+ */
+function theme_privatemsg_list_field__author($thread) {
+  $thread = $thread['thread'];
+  $author = $thread['author'];
+  $field = array();
+  $author = is_null($author) ? 'NULL' : $author;
+  $field['data'] = $author;
+  $field['class'][] = 'privatemsg-list-author';
+  return $field;
+}
+
+/**
+ * Define the author column.
+ *
+ * @see theme_privatemsg_list_header()
+ */
+function theme_privatemsg_list_header__author() {
+  return array(
+    'data'    => t('Author'),
+    'field'   => 'author',
+    'class'   => array('privatemsg-header-author'),
+    '#weight' => -50,
+  );
+}

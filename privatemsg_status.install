@@ -1,0 +1,55 @@
+<?php
+
+/**
+ * @file
+ * Install file for privatemsg_status.module
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function privatemsg_status_schema() {
+  $schema = array();
+  $schema['pm_status'] = array(
+    'description' => 'Stores information about when and by whom message was read.',
+    'fields' => array(
+      'mid' => array(
+        'description' => 'Private Message ID',
+        'type' => 'int',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+      ),
+      'timeread' => array(
+        'description' => 'Time when message was read.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+      ),
+      'recipient' => array(
+        'description' => 'Recipient ID which read the message.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+      ),
+    ),
+    'primary key' => array('mid', 'recipient'),
+  );
+
+  return $schema;
+}
+
+/**
+ * Implements hook_install().
+ */
+function privatemsg_status_install() {
+  variable_set('privatemsg_status_user_status', TRUE);
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function privatemsg_status_uninstall() {
+  variable_del('privatemsg_status_message_status');
+  variable_del('privatemsg_status_user_status');
+  variable_del('privatemsg_status_user_in_seconds');
+}

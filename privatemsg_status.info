@@ -1,0 +1,6 @@
+name = Privatemsg status
+description = Allows participants of the private message see status of the message.
+package = Mail
+core = 7.x
+dependencies[] = privatemsg
+

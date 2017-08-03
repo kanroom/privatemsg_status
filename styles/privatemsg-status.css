@@ -1,0 +1,10 @@
+.username.offline {
+  color: silver;
+}
+
+.privatemsg-message-status {
+  color: #777777;
+  padding-right: 1em;
+  font-size: 80%;
+} 
+
